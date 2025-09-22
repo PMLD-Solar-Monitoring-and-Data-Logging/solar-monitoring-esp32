@@ -1,11 +1,14 @@
+#include <BH1750.h>
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <Wire.h>
 
 // ====== User config ======
 constexpr char WIFI_SSID[] = "UGM-Hotspot";
 constexpr char WIFI_PASSWORD[] = "";
+constexpr int WIFI_TIMEOUT_MS = 5000;
 constexpr char TOKEN[] = "ByExtlDrqCtw59F5gM6C";
 constexpr char HOST[] = "thingsboard.cloud";
 constexpr int HTTPS_PORT = 443;
@@ -16,15 +19,15 @@ constexpr int HTTP_TIMEOUT = 6000;
 WiFiClientSecure client;
 
 // ====== LED ======
-#define LED_PIN 15
+#define LED_PIN 2
 inline void ledOn() { digitalWrite(LED_PIN, HIGH); }
 inline void ledOff() { digitalWrite(LED_PIN, LOW); }
 
 // ====== Pins ======
 // ESP32-S3 example where GPIO7/8 are ADC-capable. Adjust for your board if needed.
-constexpr int VS_PIN = 7;   // divider midpoint
-constexpr int ACS_PIN = 6;  // ACS712 signal directly (no divider)
-constexpr int DS_PIN = 5;
+constexpr int VS_PIN = 32;   // Voltage sensor
+constexpr int ACS_PIN = 33;  // ACS712 signal directly (no divider)
+constexpr int DS_PIN = 23;   // DS18B20 data (with 4.7k pull-up to 3.3V)
 
 // Setup a oneWire instance to communicate with any OneWire devices
 OneWire oneWire(DS_PIN);
@@ -46,10 +49,14 @@ const float sens = 0.185;  // 5A
 // const float sens = 0.100;  // 20A
 // const float sens = 0.66;  // 30A
 
+// ====== BH1750 light sensor ======
+BH1750 lightMeter(0x23);
+
 void initWiFi();
 float readVoltage_mV();
 float readCurrent_mA();
 float readTemperatureC();
+float readLight();
 void sendTelemetry(float voltage, float current_mA, float temperature, int light);
 
 // ====== Setup & Loop ======
@@ -57,14 +64,22 @@ unsigned long lastSend = 0;
 const unsigned long SEND_PERIOD_MS = 1000;  // 1s
 
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
+  Wire.begin();
+  pinMode(LED_PIN, OUTPUT);
   ledOn();
   delay(500);
   ledOff();
 
   Serial.begin(SERIAL_BAUD);
-  delay(100);
-  Serial.println("\nSolar Monitoring and Data Logging");
+  delay(1000);
+  Serial.println(F("\nSolar Monitoring and Data Logging"));
+  Serial.println(F("Starting..."));
+
+  if (lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE)) {
+    Serial.println(F("BH1750 Advanced begin"));
+  } else {
+    Serial.println(F("Error initialising BH1750"));
+  }
 
   randomSeed(esp_random());
   initWiFi();
@@ -85,9 +100,9 @@ void loop() {
     float voltage = readVoltage_mV();        // ~0–4.1 V (7.5k/30k divider)
     float current_mA = readCurrent_mA();     // **milliamps**
     float temperature = readTemperatureC();  // 20.0–39.9 °C (random)
-    int light = random(0, 1024);             // 0–1023 (random)
+    float light = readLight();               // BH1750
 
-    Serial.printf("VIN=%.2f mV, I=%.1f mA, T=%.1f C, L=%d\n", voltage, current_mA, temperature, light);
+    Serial.printf("VIN=%.2f mV, I=%.1f mA, T=%.1f C, L=%.1f lux\n", voltage, current_mA, temperature, light);
     sendTelemetry(voltage, current_mA, temperature, light);
   }
 }
@@ -97,15 +112,25 @@ void loop() {
 void initWiFi() {
   Serial.printf("Connecting to %s", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  long startAttemptTime = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
-  client.setInsecure();  // ⚠️ For production, replace with client.setCACert(root_ca)
 
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+    // Timeout after 10 seconds
+    if (millis() - startAttemptTime > 10000) {
+      Serial.println(F("\nFailed to connect to WiFi"));
+      return;
+    }
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(F("\nWiFi connected"));
+    Serial.print(F("IP address: "));
+    Serial.println(WiFi.localIP());
+  }
+
+  client.setInsecure();  // ⚠️ For production, replace with client.setCACert(root_ca)
   ledOn();
 }
 
@@ -142,9 +167,14 @@ float readTemperatureC() {
 }
 
 // ====== Send telemetry via HTTPS ======
-void sendTelemetry(float voltage, float current_mA, float temperature, int light) {
+void sendTelemetry(float voltage, float current_mA, float temperature, float light) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("WiFi not connected, cannot send telemetry"));
+    return;
+  }
+
   if (!client.connect(HOST, HTTPS_PORT, HTTP_TIMEOUT)) {
-    Serial.println("Connection to server failed!");
+    Serial.println(F("Connection to server failed!"));
     return;
   }
 
@@ -152,7 +182,7 @@ void sendTelemetry(float voltage, float current_mA, float temperature, int light
   payload += "\"voltage\":" + String(voltage, 2) + ",";
   payload += "\"current\":" + String(current_mA, 1) + ",";  // send milliamps
   payload += "\"temperature\":" + String(temperature, 1) + ",";
-  payload += "\"light\":" + String(light);
+  payload += "\"light\":" + String(light, 1);
   payload += "}";
 
   String url = "/api/v1/" + String(TOKEN) + "/telemetry";
@@ -166,4 +196,11 @@ void sendTelemetry(float voltage, float current_mA, float temperature, int light
     if (line == "\r") break;
   }
   client.stop();
+}
+
+float readLight() {
+  if (lightMeter.measurementReady()) {
+    return lightMeter.readLightLevel();
+  }
+  return -1.0f;
 }
