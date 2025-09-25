@@ -1,9 +1,12 @@
 #include <BH1750.h>
 #include <DallasTemperature.h>
+#include <LiquidCrystal_I2C.h>
 #include <OneWire.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
+
+#include "ACS712.h"
 
 // ====== User config ======
 constexpr char WIFI_SSID[] = "UGM-Hotspot";
@@ -24,7 +27,6 @@ inline void ledOn() { digitalWrite(LED_PIN, HIGH); }
 inline void ledOff() { digitalWrite(LED_PIN, LOW); }
 
 // ====== Pins ======
-// ESP32-S3 example where GPIO7/8 are ADC-capable. Adjust for your board if needed.
 constexpr int VS_PIN = 32;   // Voltage sensor
 constexpr int ACS_PIN = 33;  // ACS712 signal directly (no divider)
 constexpr int DS_PIN = 23;   // DS18B20 data (with 4.7k pull-up to 3.3V)
@@ -40,21 +42,24 @@ const float R1_V = 7500.0f;       // ohms (top resistor, 7501)
 const float R2_V = 30000.0f;      // ohms (bottom resistor, 3012)
 const float VOLT_CAL = 1.00f;     // fine calibration multiplier
 
-// ACS172 configuration
-const int nSamples = 1000;
-const float vcc = 5.0;
-const int adcMax = 1023;
+// ====== ACS712 configuration ======
+//  Arduino UNO has 5.0 volt with a max ADC value of 1023 steps
+//  ACS712 5A  uses 185 mV per A
+//  ACS712 20A uses 100 mV per A
+//  ACS712 30A uses  66 mV per A
 
-const float sens = 0.185;  // 5A
-// const float sens = 0.100;  // 20A
-// const float sens = 0.66;  // 30A
+// ACS712 ACS(A0, 5.0, 1023, 100);
+//  ESP 32 example (might requires resistors to step down the logic voltage)
+ACS712 ACS(25, 3.3, 4095, 185);
 
 // ====== BH1750 light sensor ======
 BH1750 lightMeter(0x23);
 
+// ====== LCD I2C 16x2 ======
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
 void initWiFi();
 float readVoltage_mV();
-float readCurrent_mA();
 float readTemperatureC();
 float readLight();
 void sendTelemetry(float voltage, float current_mA, float temperature, int light);
@@ -69,6 +74,17 @@ void setup() {
   ledOn();
   delay(500);
   ledOff();
+
+  //  assuming no current flowing at startup
+  ACS.autoMidPoint();
+
+  lcd.begin(16, 2);
+  lcd.backlight();
+
+  lcd.setCursor(1, 0);
+  lcd.print("Solar Monitor");
+  lcd.setCursor(2, 1);
+  lcd.print("Starting...");
 
   Serial.begin(SERIAL_BAUD);
   delay(1000);
@@ -97,13 +113,20 @@ void loop() {
   if (now - lastSend >= SEND_PERIOD_MS) {
     lastSend = now;
 
-    float voltage = readVoltage_mV();        // ~0–4.1 V (7.5k/30k divider)
-    float current_mA = readCurrent_mA();     // **milliamps**
+    float voltage_mV = readVoltage_mV();     // ~0–4.1 V (7.5k/30k divider)
+    float current_mA = ACS.mA_DC();          // -5000 to +5000 mA (5A version)
     float temperature = readTemperatureC();  // 20.0–39.9 °C (random)
     float light = readLight();               // BH1750
 
-    Serial.printf("VIN=%.2f mV, I=%.1f mA, T=%.1f C, L=%.1f lux\n", voltage, current_mA, temperature, light);
-    sendTelemetry(voltage, current_mA, temperature, light);
+    Serial.printf("VIN=%.2f mV, I=%.1f mA, T=%.1f C, L=%.1f lux\n", voltage_mV, current_mA, temperature, light);
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.printf("V:%4.1fmV", voltage_mV);
+    lcd.setCursor(0, 1);
+    lcd.printf("I:%4.1fmA", current_mA);
+
+    sendTelemetry(voltage_mV, current_mA, temperature, light);
   }
 }
 
@@ -146,19 +169,6 @@ float readVoltage_mV() {
   float vpin = (raw / ADC_MAX) * ADC_VREF;
   float vin = vpin * ((R1_V + R2_V) / R2_V) * VOLT_CAL;
   return vin * 1000.0f;  // convert V to mV
-}
-
-// Current via ACS712
-float readCurrent_mA() {
-  float sensorValue = 0;
-  for (int i = 0; i < nSamples; i++) {
-    sensorValue += analogRead(ACS_PIN);
-    delay(1);
-  }
-  float avg = sensorValue / adcMax / nSamples;
-  float current = (vcc / 2 - vcc * avg) / sens;
-
-  return current * 1000.0f;  // convert A to mA
 }
 
 float readTemperatureC() {
