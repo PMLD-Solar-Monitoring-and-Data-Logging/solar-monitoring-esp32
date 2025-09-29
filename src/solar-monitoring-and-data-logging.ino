@@ -27,11 +27,12 @@ inline void ledOn() { digitalWrite(LED_PIN, HIGH); }
 inline void ledOff() { digitalWrite(LED_PIN, LOW); }
 
 // ====== Pins ======
-constexpr int VS_PIN = 32;   // Voltage sensor
-constexpr int ACS_PIN = 33;  // ACS712 signal directly (no divider)
-constexpr int DS_PIN = 23;   // DS18B20 data (with 4.7k pull-up to 3.3V)
+constexpr int VS_PIN = 32;     // Voltage sensor
+constexpr int ACS_PIN = 33;    // ACS712 signal directly (no divider)
+constexpr int DS_PIN = 23;     // DS18B20 data (with 4.7k pull-up to 3.3V)
+constexpr int RELAY_PIN = 13;  // Relay control (active HIGH)
 
-// Setup a oneWire instance to communicate with any OneWire devices
+// ===== DS18B20 temperature sensor configuration =====
 OneWire oneWire(DS_PIN);
 DallasTemperature DSSensor(&oneWire);
 
@@ -40,7 +41,7 @@ constexpr float ADC_VREF = 3.3f;  // ESP32 ADC reference (approx.)
 constexpr int ADC_MAX = 4095;     // 12-bit
 const float R1_V = 7500.0f;       // ohms (top resistor, 7501)
 const float R2_V = 30000.0f;      // ohms (bottom resistor, 3012)
-const float VOLT_CAL = 1.00f;     // fine calibration multiplier
+const float VOLT_CAL = 2.5f;      // fine calibration multiplier
 
 // ====== ACS712 configuration ======
 //  Arduino UNO has 5.0 volt with a max ADC value of 1023 steps
@@ -49,8 +50,7 @@ const float VOLT_CAL = 1.00f;     // fine calibration multiplier
 //  ACS712 30A uses  66 mV per A
 
 // ACS712 ACS(A0, 5.0, 1023, 100);
-//  ESP 32 example (might requires resistors to step down the logic voltage)
-ACS712 ACS(25, 3.3, 4095, 185);
+ACS712 ACS(ACS_PIN, 3.3, 4095, 185);
 
 // ====== BH1750 light sensor ======
 BH1750 lightMeter(0x23);
@@ -58,11 +58,13 @@ BH1750 lightMeter(0x23);
 // ====== LCD I2C 16x2 ======
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
+// ====== Function declarations ======
 void initWiFi();
 float readVoltage_mV();
 float readTemperatureC();
 float readLight();
-void sendTelemetry(float voltage, float current_mA, float temperature, int light);
+void sendTelemetry(float voltage_mV, float current_mA, float temperature, float light);
+void getRelayState();
 
 // ====== Setup & Loop ======
 unsigned long lastSend = 0;
@@ -71,6 +73,9 @@ const unsigned long SEND_PERIOD_MS = 1000;  // 1s
 void setup() {
   Wire.begin();
   pinMode(LED_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
   ledOn();
   delay(500);
   ledOff();
@@ -101,6 +106,7 @@ void setup() {
   initWiFi();
 
   DSSensor.begin();
+  digitalWrite(RELAY_PIN, HIGH);
 }
 
 void loop() {
@@ -127,6 +133,24 @@ void loop() {
     lcd.printf("I:%4.1fmA", current_mA);
 
     sendTelemetry(voltage_mV, current_mA, temperature, light);
+  }
+
+  getRelayState();
+
+  if (Serial.available() > 0) {
+    String data = Serial.readStringUntil('\n');
+    data.trim();
+
+    Serial.println("Received command: " + data);
+    if (data == "ON") {
+      digitalWrite(RELAY_PIN, HIGH);
+      Serial.println("Relay ON");
+    } else if (data == "OFF") {
+      digitalWrite(RELAY_PIN, LOW);
+      Serial.println("Relay OFF");
+    } else {
+      Serial.println("Unknown command");
+    }
   }
 }
 
@@ -165,7 +189,7 @@ float readVoltage_mV() {
     sum += analogRead(VS_PIN);
     delayMicroseconds(120);
   }
-  float raw = static_cast<float>(sum) / SAMPLES;
+  float raw = sum / (float)SAMPLES;
   float vpin = (raw / ADC_MAX) * ADC_VREF;
   float vin = vpin * ((R1_V + R2_V) / R2_V) * VOLT_CAL;
   return vin * 1000.0f;  // convert V to mV
@@ -177,7 +201,7 @@ float readTemperatureC() {
 }
 
 // ====== Send telemetry via HTTPS ======
-void sendTelemetry(float voltage, float current_mA, float temperature, float light) {
+void sendTelemetry(float voltage_mV, float current_mA, float temperature, float light) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(F("WiFi not connected, cannot send telemetry"));
     return;
@@ -189,7 +213,7 @@ void sendTelemetry(float voltage, float current_mA, float temperature, float lig
   }
 
   String payload = "{";
-  payload += "\"voltage\":" + String(voltage, 2) + ",";
+  payload += "\"voltage\":" + String(voltage_mV, 2) + ",";
   payload += "\"current\":" + String(current_mA, 1) + ",";  // send milliamps
   payload += "\"temperature\":" + String(temperature, 1) + ",";
   payload += "\"light\":" + String(light, 1);
@@ -213,4 +237,45 @@ float readLight() {
     return lightMeter.readLightLevel();
   }
   return -1.0f;
+}
+
+void getRelayState() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("WiFi not connected, cannot send telemetry"));
+    return;
+  }
+
+  if (!client.connect(HOST, HTTPS_PORT, HTTP_TIMEOUT)) {
+    Serial.println(F("Connection to server failed!"));
+    return;
+  }
+
+  String url = "/api/v1/" + String(TOKEN) + "/attributes?sharedKeys=relay";
+  String request =
+      "GET " + url + " HTTP/1.1\r\n" + "Host: " + String(HOST) + "\r\n" + "Content-Type: application/json\r\n" + "Connection: close\r\n\r\n";
+  client.print(request);
+
+  String response;
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") break;
+  }
+  while (client.available()) {
+    response += client.readString();
+  }
+  //   Serial.println("Response: " + response);
+
+  // Parse the JSON response to get relay state
+  int relayStart = response.indexOf("\"relay\":");
+  if (relayStart != -1) {
+    if (response.indexOf("true", relayStart) != -1) {
+      digitalWrite(RELAY_PIN, HIGH);
+      Serial.println("Relay set to ON from server");
+    } else if (response.indexOf("false", relayStart) != -1) {
+      digitalWrite(RELAY_PIN, LOW);
+      Serial.println("Relay set to OFF from server");
+    }
+  }
+
+  client.stop();
 }
