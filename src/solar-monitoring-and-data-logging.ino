@@ -16,7 +16,7 @@ constexpr char TOKEN[] = "ByExtlDrqCtw59F5gM6C";
 constexpr char HOST[] = "thingsboard.cloud";
 constexpr int HTTPS_PORT = 443;
 constexpr uint32_t SERIAL_BAUD = 115200;
-constexpr int HTTP_TIMEOUT = 6000;
+constexpr int HTTP_TIMEOUT = 3000;
 
 // ====== Wi-Fi ======
 WiFiClientSecure client;
@@ -41,7 +41,7 @@ constexpr float ADC_VREF = 3.3f;  // ESP32 ADC reference (approx.)
 constexpr int ADC_MAX = 4095;     // 12-bit
 const float R1_V = 7500.0f;       // ohms (top resistor, 7501)
 const float R2_V = 30000.0f;      // ohms (bottom resistor, 3012)
-const float VOLT_CAL = 2.5f;      // fine calibration multiplier
+const float VOLT_CAL = 2.9f;      // fine calibration multiplier
 
 // ====== ACS712 configuration ======
 //  Arduino UNO has 5.0 volt with a max ADC value of 1023 steps
@@ -128,9 +128,16 @@ void loop() {
 
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.printf("V:%4.1fmV", voltage_mV);
+    lcd.printf("V:%1.2fV", voltage_mV / 1000);
     lcd.setCursor(0, 1);
-    lcd.printf("I:%4.1fmA", current_mA);
+    lcd.printf("I:%1.2fA", current_mA / 1000);
+
+    lcd.setCursor(9, 0);
+    lcd.printf("T:%d", (int)temperature);
+    lcd.print((char)223);
+    lcd.print("C");
+    lcd.setCursor(9, 1);
+    lcd.printf("L:%ulx", (int)light);
 
     sendTelemetry(voltage_mV, current_mA, temperature, light);
   }
