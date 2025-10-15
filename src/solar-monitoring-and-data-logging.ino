@@ -50,7 +50,7 @@ const float VOLT_CAL = 2.9f;      // fine calibration multiplier
 //  ACS712 30A uses  66 mV per A
 
 // ACS712 ACS(A0, 5.0, 1023, 100);
-ACS712 ACS(ACS_PIN, 3.3, 4095, 185);
+ACS712 ACS(ACS_PIN, 3.3, 3725, 185);
 
 // ====== BH1750 light sensor ======
 BH1750 lightMeter(0x23);
@@ -185,6 +185,7 @@ void initWiFi() {
   }
 
   client.setInsecure();  // ⚠️ For production, replace with client.setCACert(root_ca)
+  client.setTimeout(HTTP_TIMEOUT / 1000);
   ledOn();
 }
 
@@ -214,6 +215,7 @@ void sendTelemetry(float voltage_mV, float current_mA, float temperature, float 
     return;
   }
 
+  const long start = millis();
   if (!client.connect(HOST, HTTPS_PORT, HTTP_TIMEOUT)) {
     Serial.println(F("Connection to server failed!"));
     return;
@@ -232,7 +234,7 @@ void sendTelemetry(float voltage_mV, float current_mA, float temperature, float 
 
   client.print(request);
 
-  while (client.connected()) {
+  while (client.connected() && (millis() - start < HTTP_TIMEOUT)) {
     String line = client.readStringUntil('\n');
     if (line == "\r") break;
   }
