@@ -9,12 +9,8 @@
 #include "ACS712.h"
 
 // ====== User config ======
-constexpr char WIFI_SSID[] = "Aziz";
-constexpr char WIFI_PASSWORD[] = "[qwaszx]";
+#include "secrets.h"
 constexpr int WIFI_TIMEOUT_MS = 5000;
-constexpr char TOKEN[] = "e0k4v737c8318cpm4rne";
-constexpr char HOST[] = "tb.crazyz.biz.id";
-constexpr int PORT = 1883;
 constexpr uint32_t SERIAL_BAUD = 115200;
 
 // ====== LED ======
@@ -151,6 +147,7 @@ void loop() {
 
 // ====== Functions ======
 
+// ===== Initialize WiFi ======
 void initWiFi() {
   Serial.printf("Connecting to %s", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
